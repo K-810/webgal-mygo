@@ -41,6 +41,18 @@ const MOUTH_ANIMATION_CONFIG = {
   endThreshold: 0.95,
 } as const;
 
+/**
+ * 当前「说话」的代次。
+ *
+ * 合成口型是一条裸的 requestAnimationFrame 循环，没有注册进 performController，
+ * 因此实时预览跳转（resetStage + runFastPreview）或快速推进时，上一句的
+ * stopFunction 不会被调用；旧循环会带着闭包里的 figureId 一直驱动口型，
+ * 表现为「立绘永久保持说话口型」。
+ *
+ * 每执行一次 say() 递增此值，旧循环在下一帧发现自己已过期，就立刻闭嘴并停机。
+ */
+let mouthAnimationGeneration = 0;
+
 // 口部动画状态接口
 interface MouthAnimationState {
   startTime: number;
@@ -132,6 +144,7 @@ const initializeMouthAnimationState = (currentTime: number): MouthAnimationState
  * @return {IPerform} 执行的演出
  */
 export const say = (sentence: ISentence): IPerform => {
+  const mouthGeneration = ++mouthAnimationGeneration; // 见文件上方说明：作废旧的口型循环
   const stageState = stageStateManager.getCalculationStageState();
   const userDataState = webgalStore.getState().userData;
   let dialogKey = Math.random().toString(); // 生成一个随机的key
@@ -221,6 +234,23 @@ export const say = (sentence: ISentence): IPerform => {
     const figureAssociatedAnimation = currentStageState.figureAssociatedAnimation;
     const animationItem = figureAssociatedAnimation.find((tid) => tid.targetId === key);
     const targetKey = key ? key : `fig-${pos}`;
+
+    // 已经过期（有新的一句在说话）：立刻闭嘴并停机，避免旧循环继续驱动口型
+    if (mouthGeneration !== mouthAnimationGeneration) {
+      const pixiStage = WebGAL.gameplay.pixiStage;
+      if (pixiStage) {
+        // 与 vocal 结束时相同的收尾方式：把口部控制权交还给模型的 motion / expression
+        pixiStage.resetMouthY(targetKey);
+        if (animationItem !== undefined) {
+          pixiStage.performMouthSyncAnimation(targetKey, animationItem, 'closed', pos);
+        }
+      }
+      if (performSimulateVocalAnimationId !== null) {
+        cancelAnimationFrame(performSimulateVocalAnimationId);
+        performSimulateVocalAnimationId = null;
+      }
+      return;
+    }
 
     if (end) {
       // 标记开始结束动画
